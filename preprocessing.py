@@ -5,7 +5,8 @@ from collections import defaultdict
 import csv
 from typing import List, Dict
 from tree_sitter import Node
-from tree_sitter_languages import get_language, get_parser
+# tree_sitter_languages import removed - now using individual language packages
+import subprocess
 
 # Define your BLACKLIST_DIR, WHITELIST_FILES, NODE_TYPES, and REFERENCE_IDENTIFIERS here
 BLACKLIST_DIR = [
@@ -15,7 +16,6 @@ BLACKLIST_DIR = [
     ".git",
     ".idea",
     "venv",
-    "env",
     "node_modules",
     "dist",
     "build",
@@ -46,8 +46,7 @@ NODE_TYPES = {
     "javascript": {
         "class": "class_declaration",
         "method": "method_definition"
-    },
-    # Add other languages as needed
+    }
 }
 
 REFERENCE_IDENTIFIERS = {
@@ -70,17 +69,56 @@ REFERENCE_IDENTIFIERS = {
         "class": "identifier",
         "method": "call_expression",
         "child_field_name": "function"
-    },
-    # Add other languages as needed
+    }
 }
+
+def scan_gitignore_files(codebase_path: str) -> None:
+    """
+    Scans the codebase for .gitignore files and adds their patterns to BLACKLIST_DIR.
+    Uses find for efficient file discovery.
+    """
+    global BLACKLIST_DIR
+    gitignore_patterns = set()
+
+    try:
+        # Find all .gitignore files
+        find_cmd = f"find {codebase_path} -name '.gitignore'"
+        gitignore_files = subprocess.check_output(find_cmd, shell=True, text=True).strip().split('\n')
+        
+        for gitignore_path in gitignore_files:
+            if not gitignore_path:  # Skip empty lines
+                continue
+                
+            try:
+                with open(gitignore_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        # Skip comments and empty lines
+                        line = line.strip()
+                        if line and not line.startswith('#'):
+                            # Remove trailing slashes
+                            pattern = line.rstrip('/')
+                            gitignore_patterns.add(pattern)
+            except Exception as e:
+                print(f"Warning: Could not read {gitignore_path}: {e}")
+
+        # Add new patterns to BLACKLIST_DIR
+        for pattern in gitignore_patterns:
+            if pattern not in BLACKLIST_DIR:
+                BLACKLIST_DIR.append(pattern)
+        
+        print(f"Added {len(gitignore_patterns)} patterns from .gitignore files to BLACKLIST_DIR")
+
+    except subprocess.CalledProcessError as e:
+        print(f"Error finding .gitignore files: {e}")
+    except Exception as e:
+        print(f"Unexpected error: {e}")
 
 def get_language_from_extension(file_ext):
     FILE_EXTENSION_LANGUAGE_MAP = {
         ".java": LanguageEnum.JAVA,
         ".py": LanguageEnum.PYTHON,
         ".js": LanguageEnum.JAVASCRIPT,
-        ".rs": LanguageEnum.RUST,
-        # Add other extensions and languages as needed
+        ".rs": LanguageEnum.RUST
     }
     return FILE_EXTENSION_LANGUAGE_MAP.get(file_ext)
 
@@ -234,6 +272,10 @@ if __name__ == "__main__":
         print("Please provide the codebase path as an argument.")
         sys.exit(1)
     codebase_path = sys.argv[1]
+
+    # Scan for .gitignore files first
+    scan_gitignore_files(codebase_path)
+    print("Updated BLACKLIST_DIR with patterns from .gitignore files")
 
     files = load_files(codebase_path)
     class_data, method_data, class_names, method_names = parse_code_files(files)

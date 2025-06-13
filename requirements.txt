@@ -1,13 +1,6 @@
-lancedb
-flask
-openai
 tree-sitter==0.21.3
-tree_sitter_languages
-cohere
 pandas
 redis
 markdown
 tiktoken
-rerankers
-rerankers[transformers]
 python-dotenv
