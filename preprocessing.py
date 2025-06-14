@@ -10,27 +10,6 @@ import subprocess
 from pathlib import Path
 import pathspec
 # TODO: Add TypeScript support later
-# Define your BLACKLIST_DIR, WHITELIST_FILES, NODE_TYPES, and REFERENCE_IDENTIFIERS here
-BLACKLIST_DIR = [
-    "__pycache__",
-    ".pytest_cache",
-    ".venv",
-    ".git",
-    ".idea",
-    "venv",
-    "node_modules",
-    "dist",
-    "build",
-    ".vscode",
-    ".github",
-    ".gitlab",
-    ".angular",
-    "cdk.out",
-    ".aws-sam",
-    ".terraform"
-]
-WHITELIST_FILES = [".java", ".py", ".js", ".rs", ".go"]
-BLACKLIST_FILES = ["docker-compose.yml"]
 
 NODE_TYPES = {
     "python": {
@@ -114,10 +93,10 @@ def load_files(codebase_path):
             continue
         if path.is_file():
             ext = path.suffix
-            if ext in WHITELIST_FILES and path.name not in BLACKLIST_FILES:
-                if (lang := get_language_from_extension(ext)):
+            if (lang := get_language_from_extension(ext)):
                     print("adding", path)
                     files.append((path, lang))
+                
     return files
 
 def parse_code_files(file_list):
