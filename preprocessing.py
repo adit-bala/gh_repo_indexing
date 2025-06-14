@@ -7,7 +7,8 @@ from typing import List, Dict
 from tree_sitter import Node
 # tree_sitter_languages import removed - now using individual language packages
 import subprocess
-
+from pathlib import Path
+import pathspec
 # Define your BLACKLIST_DIR, WHITELIST_FILES, NODE_TYPES, and REFERENCE_IDENTIFIERS here
 BLACKLIST_DIR = [
     "__pycache__",
@@ -72,46 +73,15 @@ REFERENCE_IDENTIFIERS = {
     }
 }
 
-def scan_gitignore_files(codebase_path: str) -> None:
-    """
-    Scans the codebase for .gitignore files and adds their patterns to BLACKLIST_DIR.
-    Uses find for efficient file discovery.
-    """
-    global BLACKLIST_DIR
-    gitignore_patterns = set()
-
-    try:
-        # Find all .gitignore files
-        find_cmd = f"find {codebase_path} -name '.gitignore'"
-        gitignore_files = subprocess.check_output(find_cmd, shell=True, text=True).strip().split('\n')
-        
-        for gitignore_path in gitignore_files:
-            if not gitignore_path:  # Skip empty lines
-                continue
-                
-            try:
-                with open(gitignore_path, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        # Skip comments and empty lines
-                        line = line.strip()
-                        if line and not line.startswith('#'):
-                            # Remove trailing slashes
-                            pattern = line.rstrip('/')
-                            gitignore_patterns.add(pattern)
-            except Exception as e:
-                print(f"Warning: Could not read {gitignore_path}: {e}")
-
-        # Add new patterns to BLACKLIST_DIR
-        for pattern in gitignore_patterns:
-            if pattern not in BLACKLIST_DIR:
-                BLACKLIST_DIR.append(pattern)
-        
-        print(f"Added {len(gitignore_patterns)} patterns from .gitignore files to BLACKLIST_DIR")
-
-    except subprocess.CalledProcessError as e:
-        print(f"Error finding .gitignore files: {e}")
-    except Exception as e:
-        print(f"Unexpected error: {e}")
+def build_spec(root: Path) -> pathspec.PathSpec:
+    """Compile *all* .gitignore patterns under `root` into one matcher."""
+    patterns = []
+    for gi in root.rglob(".gitignore"):
+        if "venv" in gi.parts:
+            continue
+        patterns.extend(gi.read_text().splitlines())
+    print("patterns", patterns)
+    return pathspec.GitIgnoreSpec.from_lines(patterns)
 
 def get_language_from_extension(file_ext):
     FILE_EXTENSION_LANGUAGE_MAP = {
@@ -123,20 +93,19 @@ def get_language_from_extension(file_ext):
     return FILE_EXTENSION_LANGUAGE_MAP.get(file_ext)
 
 def load_files(codebase_path):
-    file_list = []
-    for root, dirs, files in os.walk(codebase_path):
-        dirs[:] = [d for d in dirs if d not in BLACKLIST_DIR]
-        for file in files:
-            file_ext = os.path.splitext(file)[1]
-            if file_ext in WHITELIST_FILES:
-                if file not in BLACKLIST_FILES:
-                    file_path = os.path.join(root, file)
-                    language = get_language_from_extension(file_ext)
-                    if language:
-                        file_list.append((file_path, language))
-                    else:
-                        print(f"Unsupported file extension {file_ext} in file {file_path}. Skipping.")
-    return file_list
+    root = Path(codebase_path).resolve()
+    spec = build_spec(root)
+    files = []
+    for path in root.rglob("*"):
+        rel = path.relative_to(root).as_posix()
+        if spec.match_file(rel):
+            continue
+        if path.is_file():
+            ext = path.suffix
+            if ext in WHITELIST_FILES and path.name not in BLACKLIST_FILES:
+                if (lang := get_language_from_extension(ext)):
+                    files.append((path, lang))
+    return files
 
 def parse_code_files(file_list):
     class_data = []
@@ -272,10 +241,6 @@ if __name__ == "__main__":
         print("Please provide the codebase path as an argument.")
         sys.exit(1)
     codebase_path = sys.argv[1]
-
-    # Scan for .gitignore files first
-    scan_gitignore_files(codebase_path)
-    print("Updated BLACKLIST_DIR with patterns from .gitignore files")
 
     files = load_files(codebase_path)
     class_data, method_data, class_names, method_names = parse_code_files(files)
