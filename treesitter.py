@@ -4,12 +4,14 @@ from enum import Enum
 import logging
 import inspect
 
+# TODO: Add TypeScript support later
 # Map of language names to their tree-sitter modules
 LANGUAGE_MODULES = {
     'python': None,
     'java': None,
     'rust': None,
-    'javascript': None
+    'javascript': None,
+    'go': None
 }
 
 # Dynamically import language modules
@@ -26,6 +28,7 @@ class LanguageEnum(Enum):
     PYTHON = "python"
     RUST = "rust"
     JAVASCRIPT = "javascript"
+    GO = "go"
     UNKNOWN = "unknown"
 
 LANGUAGE_QUERIES = {
@@ -35,15 +38,11 @@ LANGUAGE_QUERIES = {
                 name: (identifier) @class.name)
         """,
         'method_query': """
-            [
-                (method_declaration
-                    name: (identifier) @method.name)
-                (constructor_declaration
-                    name: (identifier) @method.name)
-            ]
+            (method_declaration
+                name: (identifier) @method.name)
         """,
         'doc_query': """
-            ((block_comment) @comment)
+            (comment) @comment
         """
     },
     LanguageEnum.PYTHON: {
@@ -53,11 +52,10 @@ LANGUAGE_QUERIES = {
         """,
         'method_query': """
             (function_definition
-                name: (identifier) @function.name)
+                name: (identifier) @method.name)
         """,
         'doc_query': """
-            (expression_statement
-                (string) @comment)
+            (string) @comment
         """
     },
     LanguageEnum.RUST: {
@@ -86,10 +84,29 @@ LANGUAGE_QUERIES = {
                 name: (property_identifier) @method.name)
         """,
         'doc_query': """
-            ((comment) @comment)
+            [
+                (comment) @comment
+                (jsx_text) @comment
+            ]
         """
     },
-    # Add other languages as needed
+    LanguageEnum.GO: {
+        'class_query': """
+            (type_declaration
+                (type_spec
+                    name: (type_identifier) @class.name
+                    type: (struct_type)))
+        """,
+        'method_query': """
+            (method_declaration
+                name: (field_identifier) @method.name)
+        """,
+        'doc_query': """
+            [
+                (comment) @comment
+            ]
+        """
+    }
 }
 
 class TreesitterMethodNode:
@@ -221,8 +238,10 @@ class Treesitter(ABC):
         module = LANGUAGE_MODULES.get(language_name)
         if not module:
             raise ValueError(f"Unsupported language: {language_name}")
-            
-        language_capsule = module.language()
+        if language_name == "typescript":
+            language_capsule = LANGUAGE_MODULES.get("javascript").language()
+        else:
+            language_capsule = module.language()
         language_obj = Language(language_capsule)
         parser = Parser(language_obj)
         return parser, language_obj

@@ -9,6 +9,7 @@ from tree_sitter import Node
 import subprocess
 from pathlib import Path
 import pathspec
+# TODO: Add TypeScript support later
 # Define your BLACKLIST_DIR, WHITELIST_FILES, NODE_TYPES, and REFERENCE_IDENTIFIERS here
 BLACKLIST_DIR = [
     "__pycache__",
@@ -28,7 +29,7 @@ BLACKLIST_DIR = [
     ".aws-sam",
     ".terraform"
 ]
-WHITELIST_FILES = [".java", ".py", ".js", ".rs"]
+WHITELIST_FILES = [".java", ".py", ".js", ".rs", ".go"]
 BLACKLIST_FILES = ["docker-compose.yml"]
 
 NODE_TYPES = {
@@ -47,6 +48,10 @@ NODE_TYPES = {
     "javascript": {
         "class": "class_declaration",
         "method": "method_definition"
+    },
+    "go": {
+        "class": "type_declaration",
+        "method": "method_declaration"
     }
 }
 
@@ -70,6 +75,11 @@ REFERENCE_IDENTIFIERS = {
         "class": "identifier",
         "method": "call_expression",
         "child_field_name": "function"
+    },
+    "go": {
+        "class": "type_identifier",
+        "method": "call_expression",
+        "child_field_name": "function"
     }
 }
 
@@ -88,10 +98,12 @@ def get_language_from_extension(file_ext):
         ".java": LanguageEnum.JAVA,
         ".py": LanguageEnum.PYTHON,
         ".js": LanguageEnum.JAVASCRIPT,
-        ".rs": LanguageEnum.RUST
+        ".rs": LanguageEnum.RUST,
+        ".go": LanguageEnum.GO
     }
     return FILE_EXTENSION_LANGUAGE_MAP.get(file_ext)
 
+# TODO: this is not working as expected, this combines all .gitignore files into one spec whereas we should have the sub-specs for each .gitignore file
 def load_files(codebase_path):
     root = Path(codebase_path).resolve()
     spec = build_spec(root)
@@ -104,6 +116,7 @@ def load_files(codebase_path):
             ext = path.suffix
             if ext in WHITELIST_FILES and path.name not in BLACKLIST_FILES:
                 if (lang := get_language_from_extension(ext)):
+                    print("adding", path)
                     files.append((path, lang))
     return files
 
