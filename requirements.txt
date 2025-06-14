@@ -1,6 +1,11 @@
-tree-sitter==0.21.3
+tree-sitter==0.24.0
+tree_sitter_python
+tree_sitter_java
+tree_sitter_rust
+tree_sitter_javascript
 pandas
 redis
 markdown
 tiktoken
 python-dotenv
+pathspec

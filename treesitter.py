@@ -2,28 +2,22 @@ from abc import ABC
 from tree_sitter import Language, Parser
 from enum import Enum
 import logging
-import ctypes
+import inspect
 
-# Import individual language packages
-try:
-    import tree_sitter_python as ts_python
-except ImportError:
-    ts_python = None
+# Map of language names to their tree-sitter modules
+LANGUAGE_MODULES = {
+    'python': None,
+    'java': None,
+    'rust': None,
+    'javascript': None
+}
 
-try:
-    import tree_sitter_java as ts_java
-except ImportError:
-    ts_java = None
-
-try:
-    import tree_sitter_rust as ts_rust
-except ImportError:
-    ts_rust = None
-
-try:
-    import tree_sitter_javascript as ts_javascript
-except ImportError:
-    ts_javascript = None
+# Dynamically import language modules
+for lang in LANGUAGE_MODULES:
+    try:
+        LANGUAGE_MODULES[lang] = __import__(f'tree_sitter_{lang}')
+    except ImportError:
+        logging.warning(f"Could not import tree-sitter-{lang}")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -224,25 +218,11 @@ class Treesitter(ABC):
     
     def _get_parser_and_language(self, language_name: str):
         """Get parser and language object for the specified language."""
-        if language_name == 'python' and ts_python:
-            language_capsule = ts_python.language()
-            language_obj = Language(language_capsule)
-            parser = Parser(language_obj)
-            return parser, language_obj
-        elif language_name == 'java' and ts_java:
-            language_capsule = ts_java.language()
-            language_obj = Language(language_capsule)
-            parser = Parser(language_obj)
-            return parser, language_obj
-        elif language_name == 'rust' and ts_rust:
-            language_capsule = ts_rust.language()
-            language_obj = Language(language_capsule)
-            parser = Parser(language_obj)
-            return parser, language_obj
-        elif language_name == 'javascript' and ts_javascript:
-            language_capsule = ts_javascript.language()
-            language_obj = Language(language_capsule)
-            parser = Parser(language_obj)
-            return parser, language_obj
-        else:
+        module = LANGUAGE_MODULES.get(language_name)
+        if not module:
             raise ValueError(f"Unsupported language: {language_name}")
+            
+        language_capsule = module.language()
+        language_obj = Language(language_capsule)
+        parser = Parser(language_obj)
+        return parser, language_obj
