@@ -20,7 +20,7 @@ echo "Processing the directory at $folder_path..."
 
 # Run scripts with the folder_path
 python3 preprocessing.py "$folder_path"
-#python create_tables.py "$folder_path"
+python3 create_tables.py "$folder_path"
 
 echo "Processing complete."
 

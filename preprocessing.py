@@ -69,7 +69,6 @@ def build_spec(root: Path) -> pathspec.PathSpec:
         if "venv" in gi.parts:
             continue
         patterns.extend(gi.read_text().splitlines())
-    print("patterns", patterns)
     return pathspec.GitIgnoreSpec.from_lines(patterns)
 
 def get_language_from_extension(file_ext):

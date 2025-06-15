@@ -38,8 +38,8 @@ LANGUAGE_QUERIES = {
                 name: (identifier) @class.name)
         """,
         'method_query': """
-            (method_declaration
-                name: (identifier) @method.name)
+                (method_declaration
+                    name: (identifier) @method.name)
         """,
         'doc_query': """
             (comment) @comment
@@ -238,10 +238,7 @@ class Treesitter(ABC):
         module = LANGUAGE_MODULES.get(language_name)
         if not module:
             raise ValueError(f"Unsupported language: {language_name}")
-        if language_name == "typescript":
-            language_capsule = LANGUAGE_MODULES.get("javascript").language()
-        else:
-            language_capsule = module.language()
+        language_capsule = module.language()
         language_obj = Language(language_capsule)
         parser = Parser(language_obj)
         return parser, language_obj
