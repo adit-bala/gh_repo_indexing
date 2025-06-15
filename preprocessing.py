@@ -3,7 +3,7 @@ import sys
 from treesitter import Treesitter, LanguageEnum
 from collections import defaultdict
 import csv
-from typing import List, Dict
+from typing import List, Dict, Tuple, Set
 from tree_sitter import Node
 # tree_sitter_languages import removed - now using individual language packages
 import subprocess
@@ -98,51 +98,43 @@ def load_files(codebase_path):
                 
     return files
 
-def parse_code_files(file_list):
+def process_code_content(file_path: str, content: str, language: LanguageEnum) -> Tuple[List[dict], List[dict], Set[str], Set[str]]:
+    """Process code content and return class data, method data, and sets of names."""
     class_data = []
     method_data = []
-
     all_class_names = set()
     all_method_names = set()
-
-    files_by_language = defaultdict(list)
-    for file_path, language in file_list:
-        files_by_language[language].append(file_path)
-
-    for language, files in files_by_language.items():
-        treesitter_parser = Treesitter.create_treesitter(language)
-        for file_path in files:
-            with open(file_path, "r", encoding="utf-8") as file:
-                code = file.read()
-                file_bytes = code.encode()
-                class_nodes, method_nodes = treesitter_parser.parse(file_bytes)
-
-                # Process class nodes
-                for class_node in class_nodes:
-                    class_name = class_node.name
-                    all_class_names.add(class_name)
-                    class_data.append({
-                        "file_path": file_path,
-                        "class_name": class_name,
-                        "constructor_declaration": "",  # Extract if needed
-                        "method_declarations": "\n-----\n".join(class_node.method_declarations) if class_node.method_declarations else "",
-                        "source_code": class_node.source_code,
-                        "references": []  # Will populate later
-                    })
-
-                # Process method nodes
-                for method_node in method_nodes:
-                    method_name = method_node.name
-                    all_method_names.add(method_name)
-                    method_data.append({
-                        "file_path": file_path,
-                        "class_name": method_node.class_name if method_node.class_name else "",
-                        "name": method_name,
-                        "doc_comment": method_node.doc_comment,
-                        "source_code": method_node.method_source_code,
-                        "references": []  # Will populate later
-                    })
-
+    
+    treesitter_parser = Treesitter.create_treesitter(language)
+    file_bytes = content.encode()
+    class_nodes, method_nodes = treesitter_parser.parse(file_bytes)
+    
+    # Process class nodes
+    for class_node in class_nodes:
+        class_name = class_node.name
+        all_class_names.add(class_name)
+        class_data.append({
+            "file_path": file_path,
+            "class_name": class_name,
+            "constructor_declaration": "",
+            "method_declarations": "\n-----\n".join(class_node.method_declarations) if class_node.method_declarations else "",
+            "source_code": class_node.source_code,
+            "references": []
+        })
+    
+    # Process method nodes
+    for method_node in method_nodes:
+        method_name = method_node.name
+        all_method_names.add(method_name)
+        method_data.append({
+            "file_path": file_path,
+            "class_name": method_node.class_name if method_node.class_name else "",
+            "name": method_name,
+            "doc_comment": method_node.doc_comment,
+            "source_code": method_node.method_source_code,
+            "references": []
+        })
+    
     return class_data, method_data, all_class_names, all_method_names
 
 def find_references(file_list, class_names, method_names):
@@ -227,6 +219,68 @@ def write_method_data_to_csv(method_data, output_directory):
             writer.writerow(row)
     print(f"Method data written to {output_file}")
 
+def map_references_to_data(class_data: List[dict], method_data: List[dict], references: Dict) -> Tuple[List[dict], List[dict]]:
+    """Map references back to class and method data."""
+    class_data_dict = {cd['class_name']: cd for cd in class_data}
+    method_data_dict = {(md['class_name'], md['name']): md for md in method_data}
+    
+    for class_name, refs in references['class'].items():
+        if class_name in class_data_dict:
+            class_data_dict[class_name]['references'] = refs
+    
+    for method_name, refs in references['method'].items():
+        for key in method_data_dict:
+            if key[1] == method_name:
+                method_data_dict[key]['references'] = refs
+    
+    return list(class_data_dict.values()), list(method_data_dict.values())
+
+def process_codebase(files: List[Tuple[Path, LanguageEnum]]) -> Tuple[List[dict], List[dict]]:
+    """Process a codebase and return class and method data with references."""
+    all_class_data = []
+    all_method_data = []
+    all_class_names = set()
+    all_method_names = set()
+    
+    # Process all files
+    for file_path, language in files:
+        with open(file_path, "r", encoding="utf-8") as file:
+            content = file.read()
+            class_data, method_data, class_names, method_names = process_code_content(str(file_path), content, language)
+            all_class_data.extend(class_data)
+            all_method_data.extend(method_data)
+            all_class_names.update(class_names)
+            all_method_names.update(method_names)
+    
+    # Find references
+    references = find_references(files, all_class_names, all_method_names)
+    
+    # Map references back to data
+    return map_references_to_data(all_class_data, all_method_data, references)
+
+def process_codebase_in_memory(files_by_language: Dict[LanguageEnum, List[Tuple[str, str]]]) -> Tuple[List[dict], List[dict]]:
+    """Process a codebase from in-memory files and return class and method data with references."""
+    all_class_data = []
+    all_method_data = []
+    all_class_names = set()
+    all_method_names = set()
+    
+    # Process all files
+    for language, files in files_by_language.items():
+        for file_path, content in files:
+            class_data, method_data, class_names, method_names = process_code_content(file_path, content, language)
+            all_class_data.extend(class_data)
+            all_method_data.extend(method_data)
+            all_class_names.update(class_names)
+            all_method_names.update(method_names)
+    
+    # Find references
+    file_list = [(path, lang) for lang, files in files_by_language.items() for path, _ in files]
+    references = find_references(file_list, all_class_names, all_method_names)
+    
+    # Map references back to data
+    return map_references_to_data(all_class_data, all_method_data, references)
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Please provide the codebase path as an argument.")
@@ -234,28 +288,7 @@ if __name__ == "__main__":
     codebase_path = sys.argv[1]
 
     files = load_files(codebase_path)
-    class_data, method_data, class_names, method_names = parse_code_files(files)
-
-    # Find references
-    references = find_references(files, class_names, method_names)
-
-    # Map references back to class and method data
-    class_data_dict = {cd['class_name']: cd for cd in class_data}
-    method_data_dict = {(md['class_name'], md['name']): md for md in method_data}
-
-    for class_name, refs in references['class'].items():
-        if class_name in class_data_dict:
-            class_data_dict[class_name]['references'] = refs
-
-    for method_name, refs in references['method'].items():
-        # Find all methods with this name (since methods might have the same name in different classes)
-        for key in method_data_dict:
-            if key[1] == method_name:
-                method_data_dict[key]['references'] = refs
-
-    # Convert dictionaries back to lists
-    class_data = list(class_data_dict.values())
-    method_data = list(method_data_dict.values())
+    class_data, method_data = process_codebase(files)
 
     output_directory = create_output_directory(codebase_path)
     write_class_data_to_csv(class_data, output_directory)

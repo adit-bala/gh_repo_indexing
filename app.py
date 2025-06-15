@@ -1,249 +1,182 @@
-from flask import Flask, render_template, request, session, jsonify
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import base64
+import json
 import os
 import sys
-import lancedb
-from lancedb.rerankers import AnswerdotaiRerankers
-import re
-import redis
-import uuid
-import logging
-import markdown
-from openai import OpenAI
-import json
-from dotenv import load_dotenv
-from redis import ConnectionPool
+import textwrap
+import time
+from pathlib import Path
+from typing import Dict, List
 
-load_dotenv()
+import openai
+import requests
+from cohere import Client as Cohere
+from neo4j import GraphDatabase
 
-from prompts import (
-    HYDE_SYSTEM_PROMPT,
-    HYDE_V2_SYSTEM_PROMPT,
-    CHAT_SYSTEM_PROMPT  
+NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
+NEO4J_PASS = os.getenv("NEO4J_PASSWORD", "password")
+MODEL_NAME = os.getenv("EMBED_MODEL", "text-embedding-3-small")
+TOP_K = int(os.getenv("TOP_K", "15"))
+OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
+COHERE_KEY = os.getenv("COHERE_API_KEY")
+co = Cohere(COHERE_KEY) if COHERE_KEY else None
+GH_URL = os.getenv("GH_REPO_URL")
+GH_PAT = os.getenv("GH_PAT")
+DIFF_LINES = int(os.getenv("DIFF_LINES", "200"))
+
+CHAT_SYSTEM_PROMPT = (
+    "You are an expert SRE and software engineer specializing in Root Cause Analysis (RCA) and repository investigation. "
+    "Your goal is to help identify the root cause of issues by analyzing code, dependencies, and changes.\n\n"
+    "You will be given:\n"
+    "1. <code_context> - Relevant code snippets from the repository, including:\n"
+    "   - Method and class definitions\n"
+    "   - File paths and locations\n"
+    "   - Dependencies and references\n"
+    "2. <diff> - Recent changes to the codebase\n\n"
+    "Your analysis should:\n"
+    "1. Identify potential issues or anomalies in the code\n"
+    "2. Trace dependencies and their relationships\n"
+    "3. Consider the impact of recent changes\n"
+    "4. Look for patterns that might indicate root causes\n"
+    "5. Provide actionable insights and recommendations\n\n"
+    "When investigating:\n"
+    "• Focus on error-prone areas and critical paths\n"
+    "• Consider both direct and indirect impacts\n"
+    "• Look for changes that might have introduced issues\n"
+    "• Analyze dependencies and their health\n"
+    "• Consider system architecture and design patterns\n\n"
+    "Format your response as a clear, structured RCA:\n"
+    "1. Issue Description\n"
+    "2. Analysis of Relevant Code\n"
+    "3. Impact Assessment\n"
+    "4. Root Cause Identification\n"
+    "5. Recommendations\n\n"
+    "<code_context>{code_context}</code_context>\n\n"
+    "<diff>{diff}</diff>"
 )
 
-# Configuration
-CONFIG = {
-    'SECRET_KEY': os.urandom(24),
-    'REDIS_HOST': 'localhost',
-    'REDIS_PORT': 6379,
-    'REDIS_DB': 0,
-    'REDIS_POOL_SIZE': 10,  # Add pool size configuration
-    'LOG_FILE': 'app.log',
-    'LOG_FORMAT': '%(asctime)s - %(message)s',
-    'LOG_DATE_FORMAT': '%d-%b-%y %H:%M:%S'
+HEADERS_GH = {
+    "Authorization": f"Bearer {GH_PAT}" if GH_PAT else None,
+    "Accept": "application/vnd.github.v3.diff",
 }
+HEADERS_GH = {k: v for k, v in HEADERS_GH.items() if v is not None}
 
-# Logging setup
-def setup_logging(config):
-    logging.basicConfig(
-        filename=config['LOG_FILE'],
-        level=logging.INFO,
-        format=config['LOG_FORMAT'],
-        datefmt=config['LOG_DATE_FORMAT']
+def embed(texts: List[str]) -> List[List[float]]:
+    resp = openai.embeddings.create(model=MODEL_NAME, input=texts)
+    return [d.embedding for d in resp.data]
+
+def query_neo(q_vec: List[float]) -> List[Dict]:
+    cypher = """
+    WITH $vec AS q
+    MATCH (n)
+    WHERE n.embedding IS NOT NULL AND (n:Method OR n:Class)
+    WITH n, vector.similarity.cosine(n.embedding, q) AS score
+    ORDER BY score DESC LIMIT $k
+    RETURN labels(n)[0] AS label,
+           n.file_path   AS file,
+           n.class_name  AS clazz,
+           n.name        AS method,
+           n.source_code AS source_code,
+           score
+    """
+    with driver.session() as s:
+        return [r.data() for r in s.run(cypher, vec=q_vec, k=TOP_K)]
+
+def rerank_with_cohere(query: str, hits: List[Dict]) -> List[Dict]:
+    if not co:
+        return hits
+    documents = [h.get("snippet") or f"{h['clazz']} {h.get('method','')}" for h in hits]
+    try:
+        rer = co.rerank(model="rerank-english-v3.0", query=query, documents=documents)
+        order = [r.index for r in rer]
+        return [hits[i] for i in order]
+    except Exception:
+        return hits
+
+def _owner_repo(url: str):
+    path = url.replace("https://github.com/", "").replace(".git", "")
+    owner, repo = path.split("/", 1)
+    return owner, repo
+
+def _latest_sha(owner: str, repo: str, branch: str = "main") -> str:
+    r = requests.get(
+        f"https://api.github.com/repos/{owner}/{repo}/commits/{branch}",
+        headers=HEADERS_GH,
+        timeout=30,
     )
-    # Return a logger instance
-    return logging.getLogger(__name__)
+    r.raise_for_status()
+    return r.json()["sha"]
 
-# Database setup
-def setup_database(codebase_path):
-    normalized_path = os.path.normpath(os.path.abspath(codebase_path))
-    codebase_folder_name = os.path.basename(normalized_path)
-
-    # lancedb connection
-    uri = "database"
-    db = lancedb.connect(uri)
-
-    method_table = db.open_table(codebase_folder_name + "_method")
-    class_table = db.open_table(codebase_folder_name + "_class")
-
-    return method_table, class_table
-
-# Application setup
-def setup_app():
-    app = Flask(__name__)
-    app.config.update(CONFIG)
-    
-    # Setup logging
-    app.logger = setup_logging(app.config)
-    
-    # Redis connection pooling setup
-    app.redis_pool = ConnectionPool(
-        host=app.config['REDIS_HOST'],
-        port=app.config['REDIS_PORT'],
-        db=app.config['REDIS_DB'],
-        max_connections=app.config['REDIS_POOL_SIZE']
+def _parent_sha(owner: str, repo: str, sha: str) -> str:
+    r = requests.get(
+        f"https://api.github.com/repos/{owner}/{repo}/commits/{sha}",
+        headers=HEADERS_GH,
+        timeout=30,
     )
-    
-    # Create Redis client using the connection pool
-    app.redis_client = redis.Redis(connection_pool=app.redis_pool)
-    
-    # Markdown filter
-    @app.template_filter('markdown')
-    def markdown_filter(text):
-        return markdown.markdown(text, extensions=['fenced_code', 'tables'])
-    
-    return app
+    r.raise_for_status()
+    parents = r.json()["parents"]
+    return parents[0]["sha"] if parents else sha
 
-# Create the Flask app
-app = setup_app()
+def get_latest_diff(max_lines: int = DIFF_LINES) -> str:
+    if not (GH_URL and GH_PAT):
+        return ""
+    owner, repo = _owner_repo(GH_URL)
+    head = _latest_sha(owner, repo)
+    base = _parent_sha(owner, repo, head)
+    url = f"https://api.github.com/repos/{owner}/{repo}/compare/{base}...{head}"
+    r = requests.get(url, headers=HEADERS_GH, timeout=60)
+    r.raise_for_status()
+    diff = r.text.splitlines()[:max_lines]
+    return "\n".join(diff)
 
-# OpenAI client setup
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+def _build_code_context(hits: List[Dict], n: int = 5) -> str:
+    blocks = []
+    for h in hits[:n]:
+        header = f"File: {h['file']}\nClass: {h.get('clazz')}  Method: {h.get('method')}\n"
+        source = h.get("source_code", "")
+        blocks.append(header + source)
+    return "\n---\n".join(blocks)
 
+def answer_query(query: str) -> str:
+    q_vec = embed([query])[0]
+    hits = query_neo(q_vec)
+    hits = rerank_with_cohere(query, hits)
+    code_ctx = _build_code_context(hits)
+    diff_ctx = get_latest_diff()
+    messages = [
+        {
+            "role": "system",
+            "content": CHAT_SYSTEM_PROMPT.format(code_context=code_ctx, diff=diff_ctx),
+        },
+        {"role": "user", "content": query},
+    ]
+    print(messages)
+    resp = openai.chat.completions.create(model=OPENAI_CHAT_MODEL, messages=messages)
+    return resp.choices[0].message.content.strip()
 
-# Initialize the reranker
-reranker = AnswerdotaiRerankers(column="source_code")
-
-# Replace groq_hyde function
-def openai_hyde(query):
-    chat_completion = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {
-                "role": "system",
-                "content": HYDE_SYSTEM_PROMPT
-            },
-            {
-                "role": "user",
-                "content": f"Help predict the answer to the query: {query}",
-            }
-        ]
-    )
-    return chat_completion.choices[0].message.content
-
-def openai_hyde_v2(query, temp_context, hyde_query):
-    chat_completion = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {
-                "role": "system",
-                "content": HYDE_V2_SYSTEM_PROMPT.format(query=query, temp_context=temp_context)
-            },
-            {
-                "role": "user",
-                "content": f"Predict the answer to the query: {hyde_query}",
-            }
-        ]
-    )
-    return chat_completion.choices[0].message.content
-
-
-def openai_chat(query, context):
-    chat_completion = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {
-                "role": "system",
-                "content": CHAT_SYSTEM_PROMPT.format(context=context)
-            },
-            {
-                "role": "user",
-                "content": query,
-            }
-        ]
-    )
-    return chat_completion.choices[0].message.content
-
-def process_input(input_text):
-    processed_text = input_text.replace('\n', ' ').replace('\t', ' ')
-    processed_text = re.sub(r'\s+', ' ', processed_text)
-    processed_text = processed_text.strip()
-    
-    return processed_text
-
-def generate_context(query, rerank=False):
-    hyde_query = openai_hyde(query)
-
-    method_docs = method_table.search(hyde_query).limit(5).to_pandas()
-    class_docs = class_table.search(hyde_query).limit(5).to_pandas()
-
-    temp_context = '\n'.join(method_docs['code'] + '\n'.join(class_docs['source_code']) )
-
-    hyde_query_v2 = openai_hyde_v2(query, temp_context, hyde_query)
-
-    logging.info("-query_v2-")
-    logging.info(hyde_query_v2)
-
-    method_search = method_table.search(hyde_query_v2)
-    class_search = class_table.search(hyde_query_v2)
-
-    if rerank:
-        method_search = method_search.rerank(reranker)
-        class_search = class_search.rerank(reranker)
-
-    method_docs = method_search.limit(5).to_list()
-    class_docs = class_search.limit(5).to_list()
-
-    top_3_methods = method_docs[:3]
-    methods_combined = "\n\n".join(f"File: {doc['file_path']}\nCode:\n{doc['code']}" for doc in top_3_methods)
-
-    top_3_classes = class_docs[:3]
-    classes_combined = "\n\n".join(f"File: {doc['file_path']}\nClass Info:\n{doc['source_code']} References: \n{doc['references']}  \n END OF ROW {i}" for i, doc in enumerate(top_3_classes))
-
-    app.logger.info("Context generation complete.")
-
-    return methods_combined + "\n below is class or constructor related code \n" + classes_combined
-
-@app.route('/', methods=['GET', 'POST'])
-def home():
-    if request.method == 'POST':
-        if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
-            # This is an AJAX request
-            data = request.get_json()
-            query = data['query']
-            rerank = data.get('rerank', False)  # Extract rerank value
-            user_id = session.get('user_id')
-            if user_id is None:
-                user_id = str(uuid.uuid4())
-                session['user_id'] = user_id
-
-            # Ensure rerank is a boolean
-            rerank = True if rerank in [True, 'true', 'True', '1'] else False
-
-            if '@codebase' in query:
-                query = query.replace('@codebase', '').strip()
-                context = generate_context(query, rerank)
-                app.logger.info("Generated context for query with @codebase.")
-                app.redis_client.set(f"user:{user_id}:chat_context", context)
-            else:
-                context = app.redis_client.get(f"user:{user_id}:chat_context")
-                if context is None:
-                    context = ""
-                else:
-                    context = context.decode()
-
-            # Now, apply reranking during the chat response if needed
-            response = openai_chat(query, context[:12000])  # Adjust as needed
-
-            # Store the conversation history
-            redis_key = f"user:{user_id}:responses"
-            combined_response = {'query': query, 'response': response}
-            app.redis_client.rpush(redis_key, json.dumps(combined_response))
-
-            # Return the bot's response as JSON
-            return jsonify({'response': response})
-
-    # For GET requests and non-AJAX POST requests, render the template as before
-    # Retrieve the conversation history to display
-    user_id = session.get('user_id')
-    if user_id:
-        redis_key = f"user:{user_id}:responses"
-        responses = app.redis_client.lrange(redis_key, -5, -1)
-        responses = [json.loads(resp.decode()) for resp in responses]
-        results = {'responses': responses}
-    else:
-        results = None
-
-    return render_template('query_form.html', results=results)
+driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASS))
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: python app.py <codebase_path>")
-        sys.exit(1)
-
-    codebase_path = sys.argv[1]
-    
-    # Setup database
-    method_table, class_table = setup_database(codebase_path)
-    
-    app.run(host='0.0.0.0', port=5001)
+    print("Type plain query to list hits, or 'a ' prefix to answer via LLM.")
+    try:
+        while True:
+            try:
+                raw = input("\n> ")
+            except EOFError:
+                break
+            if not raw.strip():
+                continue
+            if raw.startswith("a "):
+                print("\nAnswer:\n")
+                print(textwrap.fill(answer_query(raw[2:].strip()), width=100))
+                continue
+            q = raw.strip()
+            vec = embed([q])[0]
+            res = rerank_with_cohere(q, query_neo(vec))
+            for i, h in enumerate(res, 1):
+                print(f"#{i:2d} {h['score']:.4f} {h['file']} {h.get('clazz','')} {h.get('method','')}")
+    finally:
+        driver.close()

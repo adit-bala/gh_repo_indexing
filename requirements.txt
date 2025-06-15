@@ -11,3 +11,5 @@ python-dotenv
 pathspec
 neo4j
 openai
+requests
+cohere
