@@ -38,7 +38,6 @@ def bulk_insert(tx, label: str, rows: List[dict]):
         rows=rows
     )
 
-
 def ensure_vector_index(tx, label: str):
     tx.run(f"""
         CREATE VECTOR INDEX {label.lower()}_vec
@@ -65,12 +64,16 @@ class_csv  = proc_dir / "class_data.csv"
 methods = pd.read_csv(method_csv).fillna("empty")
 classes = pd.read_csv(class_csv).fillna("empty")
 
-methods["text"] = methods["source_code"]
+methods["text"] = methods.apply(
+    lambda r: f"File: {r.file_path}\nClass: {r.class_name}\nMethod: {r.name}\n\n"
+              f"Source Code: {clip_tokens(r.source_code, MAX_TOKENS)}",
+    axis=1
+)
 classes["text"] = classes.apply(
     lambda r: f"File: {r.file_path}\nClass: {r.class_name}\n\n"
               f"Source Code: {clip_tokens(r.source_code, MAX_TOKENS)}",
     axis=1
-)
+) 
 
 print("Embedding Method rows …")
 methods["embedding"] = embed_batch(methods["text"].tolist())
