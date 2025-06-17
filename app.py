@@ -26,7 +26,6 @@ COHERE_KEY = os.getenv("COHERE_API_KEY")
 co = Cohere(COHERE_KEY) if COHERE_KEY else None
 GH_URL = "https://github.com/adit-bala/agentic-rca"
 GH_PAT = os.getenv("GH_REPO_INDEXER_TOKEN")
-DIFF_LINES = int(os.getenv("DIFF_LINES", "200"))
 
 CHAT_SYSTEM_PROMPT = (
     "You are a code search and context gathering specialist. Your goal is to find and provide detailed context about specific code patterns, methods, or classes in the codebase.\n\n"
@@ -35,8 +34,7 @@ CHAT_SYSTEM_PROMPT = (
     "   - Method and class definitions\n"
     "   - File paths and locations\n"
     "   - Dependencies and references\n"
-    "2. <diff> - Recent changes to the codebase\n"
-    "3. <recent_commits> - Recent commits to the repository\n\n"
+    "2. <recent_commits> - Recent commits to the repository\n\n"
     "Your response should:\n"
     "1. Identify all relevant code locations that match the search query\n"
     "2. For each match, provide:\n"
@@ -57,13 +55,11 @@ CHAT_SYSTEM_PROMPT = (
     "     [relevant code snippet]\n"
     "   • Dependencies:\n"
     "     [related code references]\n"
-    "   • Recent Changes:\n"
-    "     [relevant diffs if any]\n"
     "3. Additional Context\n"
     "\n"
     "<code_context>{code_context}</code_context>\n\n"
-    "<diff>{diff}</diff>\n\n"
     "<recent_commits>{recent_commits}</recent_commits>"
+    "<hits>{hits}</hits>"
 )
 
 HEADERS_GH = {
@@ -153,35 +149,6 @@ def _parent_sha(owner: str, repo: str, sha: str) -> str:
         print(f"Response: {r.text}")
         return sha
 
-def get_latest_diff(max_lines: int = DIFF_LINES) -> str:
-    if not (GH_URL and GH_PAT):
-        print("GitHub URL or PAT not configured")
-        return ""
-    
-    owner, repo = _owner_repo(GH_URL)
-    head = _latest_sha(owner, repo)
-    if not head:
-        print("Could not get latest SHA")
-        return ""
-    
-    print(f"head: {head}")
-    base = _parent_sha(owner, repo, head)
-    print(f"base: {base}")
-    
-    url = f"https://api.github.com/repos/{owner}/{repo}/compare/{base}...{head}"
-    r = requests.get(url, headers=DIFF_HEADERS_GH, timeout=60)  # Use diff headers
-    if r.status_code != 200:
-        print(f"Error getting diff: {r.status_code}")
-        print(f"Response: {r.text}")
-        return ""
-    
-    try:
-        diff = r.text.splitlines()[:max_lines]
-        return "\n".join(diff)
-    except Exception as e:
-        print(f"Error processing diff: {e}")
-        return ""
-
 def _build_code_context(hits: List[Dict], n: int = 5) -> str:
     blocks = []
     for h in hits[:n]:
@@ -201,10 +168,10 @@ def get_recent_commits(hours) -> List[Dict]:
     url = f"https://api.github.com/repos/{owner}/{repo}/commits"
     params = {
         "since": since,
-        "per_page": 2  # Limit to 2 most recent commits
+        "per_page": 5  # Increased to show more commits
     }
     
-    r = requests.get(url, headers=HEADERS_GH, params=params, timeout=30)  # Use JSON headers
+    r = requests.get(url, headers=HEADERS_GH, params=params, timeout=30)
     if r.status_code != 200:
         print(f"Error getting recent commits: {r.status_code}")
         print(f"Response: {r.text}")
@@ -221,7 +188,7 @@ def get_recent_commits(hours) -> List[Dict]:
     for commit in commits:
         sha = commit["sha"]
         commit_url = f"https://api.github.com/repos/{owner}/{repo}/commits/{sha}"
-        commit_r = requests.get(commit_url, headers=HEADERS_GH, timeout=30)  # Use JSON headers
+        commit_r = requests.get(commit_url, headers=HEADERS_GH, timeout=30)
         if commit_r.status_code != 200:
             print(f"Error getting commit details for {sha}: {commit_r.status_code}")
             continue
@@ -234,7 +201,7 @@ def get_recent_commits(hours) -> List[Dict]:
         
         # Get the diff for this commit
         diff_url = f"https://api.github.com/repos/{owner}/{repo}/commits/{sha}"
-        diff_r = requests.get(diff_url, headers=DIFF_HEADERS_GH, timeout=30)  # Use diff headers
+        diff_r = requests.get(diff_url, headers=DIFF_HEADERS_GH, timeout=30)
         if diff_r.status_code != 200:
             print(f"Error getting diff for {sha}: {diff_r.status_code}")
             continue
@@ -244,7 +211,7 @@ def get_recent_commits(hours) -> List[Dict]:
             "message": commit_data["commit"]["message"],
             "author": commit_data["commit"]["author"]["name"],
             "date": commit_data["commit"]["author"]["date"],
-            "diff": diff_r.text[:DIFF_LINES]  # Limit diff size
+            "diff": diff_r.text  # Removed the DIFF_LINES limit to show full diff
         })
     
     return commit_details
@@ -259,40 +226,38 @@ def _build_recent_commits_context(commits: List[Dict]) -> str:
 Author: {commit['author']}
 Date: {commit['date']}
 Message: {commit['message']}
-Diff:
-{commit['diff']}
----"""
+
+{'='*80}"""
         blocks.append(block)
     
     return "\n".join(blocks)
 
-def answer_query(query: str) -> str:
+def answer_query(query: str, use_model: bool = False) -> str:
     q_vec = embed([query])[0]
     hits = query_neo(q_vec)
     hits = rerank_with_cohere(query, hits)
     code_ctx = _build_code_context(hits)
-    diff_ctx = get_latest_diff()
     recent_commits = get_recent_commits(hours=24)
     commits_ctx = _build_recent_commits_context(recent_commits)
 
     print(f"code_ctx: {code_ctx}")
-    print(f"diff_ctx: {diff_ctx}")
     print(f"commits_ctx: {commits_ctx}")
     
     messages = [
         {
             "role": "system",
             "content": CHAT_SYSTEM_PROMPT.format(
+                hits=hits,
                 code_context=code_ctx,
-                diff=diff_ctx,
                 recent_commits=commits_ctx
             ),
         },
         {"role": "user", "content": query},
     ]
-    print(messages)
-    resp = openai.chat.completions.create(model=OPENAI_CHAT_MODEL, messages=messages)
-    return resp.choices[0].message.content.strip()
+    if use_model:
+        resp = openai.chat.completions.create(model=OPENAI_CHAT_MODEL, messages=messages)
+        return resp.choices[0].message.content.strip()
+    return f"relevant hits: {hits}\n\nrelevant code snippets: {code_ctx}\n\nrecent commits: {commits_ctx}"
 
 driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASS))
 
@@ -308,7 +273,7 @@ if __name__ == "__main__":
                 continue
             if raw.startswith("a "):
                 print("\nAnswer:\n")
-                print(textwrap.fill(answer_query(raw[2:].strip()), width=100))
+                print(textwrap.fill(answer_query(raw[2:].strip(), use_model=True), width=100))
                 continue
             q = raw.strip()
             vec = embed([q])[0]
