@@ -9,6 +9,7 @@ import textwrap
 import time
 from pathlib import Path
 from typing import Dict, List
+from datetime import datetime, timedelta
 
 import openai
 import requests
@@ -23,8 +24,8 @@ TOP_K = int(os.getenv("TOP_K", "15"))
 OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
 COHERE_KEY = os.getenv("COHERE_API_KEY")
 co = Cohere(COHERE_KEY) if COHERE_KEY else None
-GH_URL = os.getenv("GH_REPO_URL")
-GH_PAT = os.getenv("GH_PAT")
+GH_URL = "https://github.com/adit-bala/agentic-rca"
+GH_PAT = os.getenv("GH_REPO_INDEXER_TOKEN")
 DIFF_LINES = int(os.getenv("DIFF_LINES", "200"))
 
 CHAT_SYSTEM_PROMPT = (
@@ -34,7 +35,8 @@ CHAT_SYSTEM_PROMPT = (
     "   - Method and class definitions\n"
     "   - File paths and locations\n"
     "   - Dependencies and references\n"
-    "2. <diff> - Recent changes to the codebase\n\n"
+    "2. <diff> - Recent changes to the codebase\n"
+    "3. <recent_commits> - Recent commits to the repository\n\n"
     "Your response should:\n"
     "1. Identify all relevant code locations that match the search query\n"
     "2. For each match, provide:\n"
@@ -60,14 +62,22 @@ CHAT_SYSTEM_PROMPT = (
     "3. Additional Context\n"
     "\n"
     "<code_context>{code_context}</code_context>\n\n"
-    "<diff>{diff}</diff>"
+    "<diff>{diff}</diff>\n\n"
+    "<recent_commits>{recent_commits}</recent_commits>"
 )
 
 HEADERS_GH = {
     "Authorization": f"Bearer {GH_PAT}" if GH_PAT else None,
-    "Accept": "application/vnd.github.v3.diff",
+    "Accept": "application/vnd.github.v3+json",  # Default to JSON
 }
 HEADERS_GH = {k: v for k, v in HEADERS_GH.items() if v is not None}
+
+# Separate headers for diff endpoints
+DIFF_HEADERS_GH = {
+    "Authorization": f"Bearer {GH_PAT}" if GH_PAT else None,
+    "Accept": "application/vnd.github.v3.diff",
+}
+DIFF_HEADERS_GH = {k: v for k, v in DIFF_HEADERS_GH.items() if v is not None}
 
 def embed(texts: List[str]) -> List[List[float]]:
     resp = openai.embeddings.create(model=MODEL_NAME, input=texts)
@@ -112,30 +122,65 @@ def _latest_sha(owner: str, repo: str, branch: str = "main") -> str:
         headers=HEADERS_GH,
         timeout=30,
     )
-    r.raise_for_status()
-    return r.json()["sha"]
+    if r.status_code != 200:
+        print(f"Error getting latest SHA: {r.status_code}")
+        print(f"Response: {r.text}")
+        return ""
+    try:
+        return r.json()["sha"]
+    except Exception as e:
+        print(f"Error parsing JSON response: {e}")
+        print(f"Response: {r.text}")
+        return ""
 
 def _parent_sha(owner: str, repo: str, sha: str) -> str:
+    if not sha:
+        return ""
     r = requests.get(
         f"https://api.github.com/repos/{owner}/{repo}/commits/{sha}",
         headers=HEADERS_GH,
         timeout=30,
     )
-    r.raise_for_status()
-    parents = r.json()["parents"]
-    return parents[0]["sha"] if parents else sha
+    if r.status_code != 200:
+        print(f"Error getting parent SHA: {r.status_code}")
+        print(f"Response: {r.text}")
+        return sha
+    try:
+        parents = r.json()["parents"]
+        return parents[0]["sha"] if parents else sha
+    except Exception as e:
+        print(f"Error parsing JSON response: {e}")
+        print(f"Response: {r.text}")
+        return sha
 
 def get_latest_diff(max_lines: int = DIFF_LINES) -> str:
     if not (GH_URL and GH_PAT):
+        print("GitHub URL or PAT not configured")
         return ""
+    
     owner, repo = _owner_repo(GH_URL)
     head = _latest_sha(owner, repo)
+    if not head:
+        print("Could not get latest SHA")
+        return ""
+    
+    print(f"head: {head}")
     base = _parent_sha(owner, repo, head)
+    print(f"base: {base}")
+    
     url = f"https://api.github.com/repos/{owner}/{repo}/compare/{base}...{head}"
-    r = requests.get(url, headers=HEADERS_GH, timeout=60)
-    r.raise_for_status()
-    diff = r.text.splitlines()[:max_lines]
-    return "\n".join(diff)
+    r = requests.get(url, headers=DIFF_HEADERS_GH, timeout=60)  # Use diff headers
+    if r.status_code != 200:
+        print(f"Error getting diff: {r.status_code}")
+        print(f"Response: {r.text}")
+        return ""
+    
+    try:
+        diff = r.text.splitlines()[:max_lines]
+        return "\n".join(diff)
+    except Exception as e:
+        print(f"Error processing diff: {e}")
+        return ""
 
 def _build_code_context(hits: List[Dict], n: int = 5) -> str:
     blocks = []
@@ -145,16 +190,103 @@ def _build_code_context(hits: List[Dict], n: int = 5) -> str:
         blocks.append(header + source)
     return "\n---\n".join(blocks)
 
+def get_recent_commits(hours) -> List[Dict]:
+    if not (GH_URL and GH_PAT):
+        print("GitHub URL or PAT not configured")
+        return []
+    
+    owner, repo = _owner_repo(GH_URL)
+    since = (datetime.now() - timedelta(hours=hours)).isoformat()
+    
+    url = f"https://api.github.com/repos/{owner}/{repo}/commits"
+    params = {
+        "since": since,
+        "per_page": 2  # Limit to 2 most recent commits
+    }
+    
+    r = requests.get(url, headers=HEADERS_GH, params=params, timeout=30)  # Use JSON headers
+    if r.status_code != 200:
+        print(f"Error getting recent commits: {r.status_code}")
+        print(f"Response: {r.text}")
+        return []
+    
+    try:
+        commits = r.json()
+    except Exception as e:
+        print(f"Error parsing commits JSON: {e}")
+        print(f"Response: {r.text}")
+        return []
+    
+    commit_details = []
+    for commit in commits:
+        sha = commit["sha"]
+        commit_url = f"https://api.github.com/repos/{owner}/{repo}/commits/{sha}"
+        commit_r = requests.get(commit_url, headers=HEADERS_GH, timeout=30)  # Use JSON headers
+        if commit_r.status_code != 200:
+            print(f"Error getting commit details for {sha}: {commit_r.status_code}")
+            continue
+        
+        try:
+            commit_data = commit_r.json()
+        except Exception as e:
+            print(f"Error parsing commit details JSON: {e}")
+            continue
+        
+        # Get the diff for this commit
+        diff_url = f"https://api.github.com/repos/{owner}/{repo}/commits/{sha}"
+        diff_r = requests.get(diff_url, headers=DIFF_HEADERS_GH, timeout=30)  # Use diff headers
+        if diff_r.status_code != 200:
+            print(f"Error getting diff for {sha}: {diff_r.status_code}")
+            continue
+        
+        commit_details.append({
+            "sha": sha,
+            "message": commit_data["commit"]["message"],
+            "author": commit_data["commit"]["author"]["name"],
+            "date": commit_data["commit"]["author"]["date"],
+            "diff": diff_r.text[:DIFF_LINES]  # Limit diff size
+        })
+    
+    return commit_details
+
+def _build_recent_commits_context(commits: List[Dict]) -> str:
+    if not commits:
+        return "No recent commits found."
+    
+    blocks = []
+    for commit in commits:
+        block = f"""Commit: {commit['sha']}
+Author: {commit['author']}
+Date: {commit['date']}
+Message: {commit['message']}
+Diff:
+{commit['diff']}
+---"""
+        blocks.append(block)
+    
+    return "\n".join(blocks)
+
 def answer_query(query: str) -> str:
     q_vec = embed([query])[0]
     hits = query_neo(q_vec)
     hits = rerank_with_cohere(query, hits)
     code_ctx = _build_code_context(hits)
     diff_ctx = get_latest_diff()
+    recent_commits = get_recent_commits(hours=24)
+    commits_ctx = _build_recent_commits_context(recent_commits)
+
+    print(f"code_ctx: {code_ctx}")
+    print(f"diff_ctx: {diff_ctx}")
+    print(f"commits_ctx: {commits_ctx}")
+    
     messages = [
         {
             "role": "system",
-            "content": CHAT_SYSTEM_PROMPT.format(code_context=code_ctx, diff=diff_ctx),
+            "content": CHAT_SYSTEM_PROMPT.format(
+                code_context=code_ctx,
+                diff=diff_ctx,
+                recent_commits=commits_ctx
+            ),
         },
         {"role": "user", "content": query},
     ]
